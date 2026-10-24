@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>binance-specs</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --fg: #16181d; --muted: #5d6573; --line: #dfe3ea;
+    --grid: rgba(22, 24, 29, 0.07); --accent: #2457d6; --buy: #128a52; --sell: #d23c3c; --draw: #c77700;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --fg: #e8eaef; --muted: #98a0ae; --line: #2a2f3a;
+      --grid: rgba(232, 234, 239, 0.08); --accent: #6f9bff; --buy: #34c47e; --sell: #ff6b6b; --draw: #f0a531;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { margin: 0; font-size: 22px; }
+  .muted { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 12px; }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 22px; text-align: center; cursor: pointer; }
+  .drop.over { border-color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, select, button { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--fg); }
+  input[type="number"] { width: 90px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .chart canvas { cursor: grab; }
+  .chart canvas.panning { cursor: grabbing; }
+  .stats { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 14px; }
+  .stats b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chart { position: relative; height: 440px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--muted); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>binance-specs</h1>
+    <div class="muted">Сделки Binance (aggTrades) вокруг листинга по миллисекундам. Файлы никуда не отправляются, всё считается в браузере.</div>
+  </header>
+
+  <section class="panel">
+    <div class="drop" id="drop">Перетащи сюда zip или csv aggTrades с data.binance.vision, или нажми, чтобы выбрать файл</div>
+    <input type="file" id="file" accept=".zip,.csv" hidden>
+    <div class="muted" id="file-info">Файл не выбран</div>
+    <div class="row">
+      <label>Листинг Upbit<select id="listing"><option value="">Свой листинг: время вручную</option></select></label>
+    </div>
+    <div class="muted" id="archive"></div>
+    <div class="row">
+      <label>Дата листинга<input type="date" id="date"></label>
+      <label>Время (чч:мм:сс.ммм)<input type="text" id="time" value="00:00:00.000" size="12"></label>
+      <label>Часовой пояс
+        <select id="tz">
+          <option value="9">KST (Upbit)</option>
+          <option value="0">UTC</option>
+        </select>
+      </label>
+      <label>Секунд до<input type="number" id="before" value="5" min="0" step="1"></label>
+      <label>Секунд после<input type="number" id="after" value="15" min="1" step="1"></label>
+      <button type="button" class="primary" id="build">Построить</button>
+    </div>
+    <div class="muted" id="status"></div>
+  </section>
+
+  <section class="panel" id="result" hidden>
+    <div class="stats" id="stats"></div>
+    <div class="row">
+      <button type="button" id="zoom-all">Всё окно</button>
+      <span class="muted">Колесо — масштаб · потянуть — сдвиг · двойной клик — всё окно</span>
+      <span class="legend">
+        <span><span class="dot" style="background:var(--buy)"></span>покупки</span>
+        <span><span class="dot" style="background:var(--sell)"></span>продажи</span>
+        <span>размер точки — объём · пунктир — +15% и +20% · вертикальные линии — объявление Upbit и начало рывка</span>
+      </span>
+    </div>
+    <div class="chart" id="chart-box"><canvas id="chart"></canvas></div>
+  </section>
+</main>
+
+<script src="listings.js"></script>
+<script src="data/index.js"></script>
+<script src="data/supply.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const pct = (v) => (v > 0 ? "+" : "") + v.toFixed(1) + "%";
+let file = null, chart = null, result = null;
+const utcDate = (iso) => new Date(iso).toISOString().slice(0, 10);
+const tradeFiles = new Set(window.TRADE_FILES || []);
+const DATA_BEFORE_MS = 5_000, DATA_AFTER_MS = 65_000;
+const dataKey = (l) => `${l.token}_${Date.parse(l.listedAt)}`;
+const listings = (window.UPBIT_LISTINGS || []).filter((l) => tradeFiles.has(dataKey(l))).sort((a, b) => b.listedAt.localeCompare(a.listedAt));
+
+listings.forEach((l, i) => {
+  const option = document.createElement("option");
+  option.value = i;
+  option.textContent = `${l.token} · ${l.listedAt.slice(0, 19).replace("T", " ")} KST`;
+  $("listing").appendChild(option);
+});
+if (!listings.length) $("archive").textContent = "Нет скачанных листингов: запусти python3 download_trades.py рядом с этим файлом.";
+
+function selectListing(index) {
+  $("listing").value = index;
+  const l = listings[index];
+  if (!l) { $("archive").textContent = ""; return; }
+  const [date, time] = l.listedAt.slice(0, 19).split("T");
+  $("date").value = date; $("time").value = time + ".000"; $("tz").value = "9";
+  $("archive").textContent = "Сделки уже скачаны, zip не нужен: просто нажми «Построить».";
+}
+
+function loadTradeFile(key) {
+  if (window.TRADES && window.TRADES[key]) return Promise.resolve(window.TRADES[key]);
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `data/${key}.js`;
+    script.onload = () => resolve(window.TRADES[key]);
+    script.onerror = () => reject(new Error(`не найден файл data/${key}.js`));
+    document.head.appendChild(script);
+  });
+}
+$("listing").addEventListener("change", (e) => {
+  file = null;
+  $("file-info").textContent = "Файл не выбран";
+  selectListing(e.target.value);
+});
+["date", "time", "tz"].forEach((id) => $(id).addEventListener("input", () => {
+  if ($("listing").value === "") return;
+  $("listing").value = "";
+  $("archive").textContent = "Свой листинг: время из полей ниже.";
+}));
+
+function pickFile(f) {
+  file = f;
+  $("file-info").textContent = `${f.name} · ${(f.size / 1e6).toFixed(1)} МБ`;
+  const match = f.name.match(/^([A-Z0-9]+)USDT-aggTrades-(\d{4}-\d{2}-\d{2})/);
+  if (!match) return;
+  const [, token, day] = match;
+  const index = listings.findIndex((l) => l.token === token && utcDate(l.listedAt) === day);
+  if (index >= 0) {
+    selectListing(index);
+  } else {
+    $("listing").value = "";
+    $("date").value = day;
+    $("archive").textContent = `В списке Upbit нет листинга ${token} за ${day}. Введи время вручную или обнови список: python3 update_listings.py`;
+  }
+}
+
+$("drop").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", (e) => e.target.files[0] && pickFile(e.target.files[0]));
+$("drop").addEventListener("dragover", (e) => { e.preventDefault(); $("drop").classList.add("over"); });
+$("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
+$("drop").addEventListener("drop", (e) => {
+  e.preventDefault(); $("drop").classList.remove("over");
+  if (e.dataTransfer.files[0]) pickFile(e.dataTransfer.files[0]);
+});
+
+function listingTime() {
+  const [h, m, s] = $("time").value.trim().split(":");
+  const [sec, ms = "0"] = (s || "0").split(".");
+  const [y, mo, d] = $("date").value.split("-").map(Number);
+  const utc = Date.UTC(y, mo - 1, d, Number(h), Number(m), Number(sec), Number(ms.padEnd(3, "0").slice(0, 3)));
+  return utc - Number($("tz").value) * 3600_000;
+}
+
+// Reads CSV lines from a zip or csv file and stops after `end` (archives are sorted by time).
+async function readTrades(start, end) {
+  const trades = [];
+  let done = false;
+  const handle = (line) => {
+    const parts = line.split(",");
+    if (parts.length < 7 || !/^\d/.test(parts[0])) return;
+    let ts = Number(parts[5]);
+    if (ts > 1e14) ts = Math.floor(ts / 1000);
+    if (ts < start) return;
+    if (ts > end) { done = true; return; }
+    trades.push({ ts, price: Number(parts[1]), qty: Number(parts[2]), buy: parts[6].trim().toLowerCase() !== "true" });
+  };
+
+  if (file.name.toLowerCase().endsWith(".zip")) {
+    const zip = await JSZip.loadAsync(file);
+    const entry = Object.values(zip.files).find((f) => !f.dir && f.name.toLowerCase().endsWith(".csv"));
+    if (!entry) throw new Error("В zip нет csv-файла");
+    await new Promise((resolve, reject) => {
+      let rest = "";
+      const stream = entry.internalStream("string");
+      stream.on("data", (chunk) => {
+        if (done) return;
+        rest += chunk;
+        const lines = rest.split("\n");
+        rest = lines.pop();
+        for (const line of lines) { handle(line); if (done) { stream.pause(); resolve(); return; } }
+      }).on("error", reject).on("end", () => { if (rest) handle(rest); resolve(); }).resume();
+    });
+  } else {
+    const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+    let rest = "";
+    while (!done) {
+      const { value, done: finished } = await reader.read();
+      if (finished) { if (rest) handle(rest); break; }
+      rest += value;
+      const lines = rest.split("\n");
+      rest = lines.pop();
+      for (const line of lines) { handle(line); if (done) break; }
+    }
+    reader.cancel();
+  }
+  return trades;
+}
+
+$("build").addEventListener("click", async () => {
+  const selected = listings[$("listing").value];
+  const stored = !file && selected && tradeFiles.has(dataKey(selected));
+  if (!file && !stored) { $("status").textContent = "Выбери листинг, для которого есть данные, или кинь zip."; return; }
+  if (!$("date").value) { $("status").textContent = "Укажи дату листинга."; return; }
+  const listing = listingTime();
+  let before = Number($("before").value) * 1000, after = Number($("after").value) * 1000, note = "";
+  if (stored && (before > DATA_BEFORE_MS || after > DATA_AFTER_MS)) {
+    before = Math.min(before, DATA_BEFORE_MS); after = Math.min(after, DATA_AFTER_MS);
+    note = " В скачанных данных окно от −5 до +65 с, показано сколько есть.";
+  }
+  const start = listing - before, end = listing + after;
+  $("status").textContent = stored ? "Загружаю сделки…" : "Читаю файл…";
+  try {
+    const trades = stored
+      ? (await loadTradeFile(dataKey(selected))).filter((t) => t[0] >= start && t[0] <= end).map((t) => ({ ts: t[0], price: t[1], qty: t[2], buy: t[3] === 0 }))
+      : await readTrades(start, end);
+    if (!trades.length) { $("status").textContent = "В этом окне нет сделок. Проверь дату, время и часовой пояс."; return; }
+    const token = stored ? selected.token : (file.name.match(/^([A-Z0-9]+)USDT/) || [])[1];
+    result = analyze(trades, listing, token);
+    result.range = [start - listing, end - listing];
+    $("status").textContent = `Найдено сделок в окне: ${trades.length.toLocaleString("ru-RU")}.${note}`;
+    $("result").hidden = false;
+    resetView();
+  } catch (error) {
+    $("status").textContent = "Не удалось прочитать файл: " + error.message;
+  }
+});
+
+function analyze(trades, listing, token) {
+  const before = trades.filter((t) => t.ts < listing);
+  const ref = before.length ? before[before.length - 1].price : trades[0].price;
+  const reaction = trades.find((t) => t.ts >= listing && t.price >= ref * 1.01);
+  const priceAt = (ms) => { let p = ref; for (const t of trades) { if (t.ts > ms) break; p = t.price; } return p; };
+  const after = trades.filter((t) => t.ts >= listing);
+  const peak = after.reduce((best, t) => (t.price > best.price ? t : best), after[0] || trades[0]);
+
+  // One point per millisecond and side: volume-weighted price.
+  const points = new Map();
+  for (const t of trades) {
+    const key = t.ts + (t.buy ? "b" : "s");
+    const p = points.get(key) || { x: t.ts - listing, buy: t.buy, value: 0, qty: 0 };
+    p.value += t.price * t.qty; p.qty += t.qty; points.set(key, p);
+  }
+  const scatter = [...points.values()].map((p) => ({ x: p.x, y: (p.value / p.qty / ref - 1) * 100, usd: p.value, buy: p.buy }));
+
+  const base = reaction ? reaction.ts : listing;
+  const buyUsd = after.filter((t) => t.buy).reduce((s, t) => s + t.price * t.qty, 0);
+  const sellUsd = after.filter((t) => !t.buy).reduce((s, t) => s + t.price * t.qty, 0);
+  const supply = (window.SUPPLY || {})[token];
+  const cap = supply ? ref * supply : null;
+  const capText = cap === null ? "нет данных" : cap >= 1e9 ? `$${(cap / 1e9).toFixed(2)}B` : `$${(cap / 1e6).toFixed(1)}M`;
+  $("stats").innerHTML = [
+    `Капа ≈ <b>${capText}</b>`,
+    `Цена до листинга <b>${ref}</b>`,
+    reaction ? `Рывок (+1%) через <b>${reaction.ts - listing} мс</b> после листинга` : "Рывка на +1% нет",
+    ...[1000, 5000, 10000, 15000].map((ms) => `+${ms / 1000} с от рывка <b>${pct((priceAt(base + ms) / ref - 1) * 100)}</b>`),
+    `Пик <b>${pct((peak.price / ref - 1) * 100)}</b> через <b>${peak.ts - listing} мс</b>`,
+    `Покупки <b>$${Math.round(buyUsd).toLocaleString("ru-RU")}</b> · продажи <b>$${Math.round(sellUsd).toLocaleString("ru-RU")}</b>`,
+  ].map((s) => `<span>${s}</span>`).join("");
+
+  return { scatter, reactionMs: reaction ? reaction.ts - listing : null };
+}
+
+const MIN_SPAN_MS = 2;
+let view = null, redrawPending = false, panning = null;
+
+function setView([min, max]) {
+  const [lo, hi] = result.range;
+  const span = Math.min(Math.max(max - min, MIN_SPAN_MS), hi - lo);
+  min = Math.min(Math.max(min, lo), hi - span);
+  view = [min, min + span];
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => { redrawPending = false; draw(view); });
+}
+function resetView() { setView(result.range); }
+$("zoom-all").addEventListener("click", () => result && resetView());
+$("chart").addEventListener("dblclick", () => result && resetView());
+$("chart").addEventListener("wheel", (event) => {
+  if (!result || !chart) return;
+  event.preventDefault();
+  const rect = chart.canvas.getBoundingClientRect();
+  const center = chart.scales.x.getValueForPixel(event.clientX - rect.left);
+  const factor = Math.exp(Math.max(-100, Math.min(100, event.deltaY)) * 0.0012);
+  setView([center - (center - view[0]) * factor, center + (view[1] - center) * factor]);
+}, { passive: false });
+
+const markers = {
+  id: "markers",
+  afterDatasetsDraw(chart, args, options) {
+    const { ctx, chartArea: { top, bottom, left, right }, scales: { x } } = chart;
+    options.lines.forEach((line, index) => {
+      const px = x.getPixelForValue(line.x);
+      if (px < left || px > right) return;
+      ctx.save();
+      ctx.strokeStyle = line.color; ctx.lineWidth = 1.5; ctx.setLineDash(line.dash || []);
+      ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
+      ctx.font = "12px system-ui, sans-serif";
+      const width = ctx.measureText(line.label).width;
+      const lx = px + 6 + width > right ? px - 6 - width : px + 6;
+      const ly = top + 16 + index * 20;
+      ctx.fillStyle = css("--panel"); ctx.fillRect(lx - 3, ly - 12, width + 6, 16);
+      ctx.fillStyle = line.color; ctx.fillText(line.label, lx, ly);
+      ctx.restore();
+    });
+  },
+};
+
+function timeLabel(ms, span) {
+  if (span <= 3000) return (ms > 0 ? "+" : "") + Math.round(ms) + " мс";
+  const sec = ms / 1000;
+  return ms === 0 ? "0" : (sec > 0 ? "+" : "") + sec.toLocaleString("ru-RU", { maximumFractionDigits: 1 }) + " с";
+}
+
+
+
+
+$("chart").addEventListener("pointerdown", (event) => {
+  if (!result || !chart) return;
+  panning = { x: event.clientX, view: view.slice() };
+  $("chart").classList.add("panning");
+  $("chart").setPointerCapture(event.pointerId);
+});
+$("chart").addEventListener("pointermove", (event) => {
+  if (!panning) return;
+  const msPerPx = (panning.view[1] - panning.view[0]) / (chart.chartArea.right - chart.chartArea.left);
+  const shift = (panning.x - event.clientX) * msPerPx;
+  setView([panning.view[0] + shift, panning.view[1] + shift]);
+});
+$("chart").addEventListener("pointerup", () => {
+  if (!panning) return;
+  panning = null;
+  $("chart").classList.remove("panning");
+});
+
+function draw([min, max]) {
+  const muted = css("--muted"), grid = css("--grid");
+  const visible = result.scatter.filter((p) => p.x >= min && p.x <= max);
+  const radius = (usd) => Math.min(9, 1.5 + Math.sqrt(usd) / 40);
+  const side = (buy, color) => {
+    const data = visible.filter((p) => p.buy === buy);
+    return { label: buy ? "покупки" : "продажи", data, backgroundColor: color + "99", borderWidth: 0, pointRadius: data.map((p) => radius(p.usd)) };
+  };
+  const level = (v) => ({ type: "line", label: "+" + v + "%", data: [{ x: min, y: v }, { x: max, y: v }], borderColor: muted, borderWidth: 1, borderDash: [5, 5], pointRadius: 0 });
+  const ys = visible.map((p) => p.y);
+  let yMin = ys.length ? Math.min(...ys) : 0, yMax = ys.length ? Math.max(...ys) : 1;
+  const pad = Math.max((yMax - yMin) * 0.08, 0.1);
+  yMin -= pad; yMax += pad;
+  const levels = [15, 20].filter((v) => v >= yMin && v <= yMax).map(level);
+  if (chart) chart.destroy();
+  chart = new Chart($("chart"), {
+    type: "scatter",
+    data: { datasets: [side(true, css("--buy")), side(false, css("--sell")), ...levels] },
+    plugins: [markers],
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        markers: { lines: [
+          { x: 0, label: "объявление Upbit", color: css("--fg") },
+        ] },
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: (items) => `${items[0].parsed.x} мс от объявления Upbit`,
+          label: (item) => item.raw.usd === undefined ? item.dataset.label : `${item.dataset.label}: ${pct(item.parsed.y)}, $${Math.round(item.raw.usd).toLocaleString("ru-RU")}`,
+        } },
+      },
+      scales: {
+        x: { type: "linear", min, max, grid: { color: grid }, ticks: { color: muted, maxTicksLimit: 11, callback: (v) => timeLabel(v, max - min) }, title: { display: true, text: "время от объявления Upbit", color: muted } },
+        y: { min: yMin, max: yMax, grid: { color: grid }, ticks: { color: muted, callback: (v) => pct(v) }, title: { display: true, text: "цена от цены до листинга", color: muted } },
+      },
+    },
+  });
+}
+</script>
+</body>
+</html>

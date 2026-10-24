@@ -80,7 +80,7 @@
       <span class="legend">
         <span><span class="dot" style="background:var(--buy)"></span>покупки</span>
         <span><span class="dot" style="background:var(--sell)"></span>продажи</span>
-        <span>размер точки — объём · пунктир — +15% и +20% · вертикальные линии — объявление Upbit и начало рывка</span>
+        <span>размер точки — объём · пунктир — +15% и +20% · вертикальная линия — время листинга из полей выше</span>
       </span>
     </div>
     <div class="chart" id="chart-box"><canvas id="chart"></canvas></div>
@@ -117,7 +117,7 @@ function selectListing(index) {
   if (!l) { $("archive").textContent = ""; return; }
   const [date, time] = l.listedAt.slice(0, 19).split("T");
   $("date").value = date; $("time").value = time + ".000"; $("tz").value = "9";
-  $("archive").textContent = "Сделки уже скачаны, zip не нужен: просто нажми «Построить».";
+  $("archive").textContent = "Сделки уже скачаны, zip не нужен: просто нажми «Построить». Время можно поправить: данные есть от −5 до +65 с вокруг времени Upbit.";
 }
 
 function loadTradeFile(key) {
@@ -135,11 +135,6 @@ $("listing").addEventListener("change", (e) => {
   $("file-info").textContent = "Файл не выбран";
   selectListing(e.target.value);
 });
-["date", "time", "tz"].forEach((id) => $(id).addEventListener("input", () => {
-  if ($("listing").value === "") return;
-  $("listing").value = "";
-  $("archive").textContent = "Свой листинг: время из полей ниже.";
-}));
 
 function pickFile(f) {
   file = f;
@@ -378,16 +373,16 @@ function draw([min, max]) {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
         markers: { lines: [
-          { x: 0, label: "объявление Upbit", color: css("--fg") },
+          { x: 0, label: "время листинга", color: css("--fg") },
         ] },
         legend: { display: false },
         tooltip: { callbacks: {
-          title: (items) => `${items[0].parsed.x} мс от объявления Upbit`,
+          title: (items) => `${items[0].parsed.x} мс от времени листинга`,
           label: (item) => item.raw.usd === undefined ? item.dataset.label : `${item.dataset.label}: ${pct(item.parsed.y)}, $${Math.round(item.raw.usd).toLocaleString("ru-RU")}`,
         } },
       },
       scales: {
-        x: { type: "linear", min, max, grid: { color: grid }, ticks: { color: muted, maxTicksLimit: 11, callback: (v) => timeLabel(v, max - min) }, title: { display: true, text: "время от объявления Upbit", color: muted } },
+        x: { type: "linear", min, max, grid: { color: grid }, ticks: { color: muted, maxTicksLimit: 11, callback: (v) => timeLabel(v, max - min) }, title: { display: true, text: "время от листинга", color: muted } },
         y: { min: yMin, max: yMax, grid: { color: grid }, ticks: { color: muted, callback: (v) => pct(v) }, title: { display: true, text: "цена от цены до листинга", color: muted } },
       },
     },
